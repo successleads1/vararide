@@ -3,18 +3,15 @@
   "version": "0.1.0",
   "description": "VayaRide backend (Express · Socket.IO · Telegram bot)",
   "private": true,
-
-  /* ESM everywhere */
   "type": "module",
   "main": "dist/server.js",
 
   "scripts": {
-    "dev":   "tsx watch server.ts",     // local dev with hot‑reload
-    "build": "tsc -p tsconfig.json",    // compile → dist/
-    "start": "node dist/server.js"      // prod entry‑point (Render)
+    "dev": "tsx watch server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
   },
 
-  /* Tell Render (and teammates) which Node you target */
   "engines": {
     "node": "20.x"
   },
