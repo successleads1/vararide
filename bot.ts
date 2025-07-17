@@ -204,25 +204,28 @@ bot.on('message', async (m: Message) => {
           '❌ Unsupported file type. Only JPG/PNG and PDF are allowed.');
     }
 
-    /* d) Cloudinary upload – retry once with buffer -------------- */
-    let upload: any;
-    try {
-      // 1. read the entire Telegram response into a Buffer (≤ 20 MB) …
-      const buf  = await tgResp.arrayBuffer();
-      const data = Buffer.from(buf);
+   
+ /* d) Cloudinary upload — retry once with buffer ------------------ */
+let upload: any;
+try {
+  const mime = m.document?.mime_type ??
+               (m.photo ? 'image/jpeg' : 'application/octet-stream');
 
-      // 2. plain upload (single POST). 180 s request‑timeout just in case
-      upload = await cloud.uploader.upload(data, {
-        folder: `vayaride/${chat}`,
-        public_id: nextKey,
-        resource_type: resType,
-        timeout: 180_000           // 3 minutes
-      });
-    } catch (err) {
-      console.error('[DOC] Cloudinary error:', err);
-      const msg = (err as any)?.message ?? 'Upload failed (Cloudinary)';
-      return bot.sendMessage(chat, `❌ ${msg}`);
-    }
+  const buf      = Buffer.from(await tgResp.arrayBuffer());
+  const dataUri  = `data:${mime};base64,${buf.toString('base64')}`;
+
+  upload = await cloud.uploader.upload(dataUri, {
+    folder: `vayaride/${chat}`,
+    public_id: nextKey,
+    resource_type: resType,
+    timeout: 180_000               // 3 min
+  });
+} catch (err) {
+  console.error('[DOC] Cloudinary error:', err);
+  const msg = (err as any)?.message ?? 'Upload failed (Cloudinary)';
+  return bot.sendMessage(chat, `❌ ${msg}`);
+}
+
 
     /* e) Save doc metadata to Mongo */
     await d.addOrUpdateDocument(nextKey,{
