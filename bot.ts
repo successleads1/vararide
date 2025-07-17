@@ -1,9 +1,9 @@
 /**********************************************************************
- * bot.ts – VayaRide Driver Bot (registration • PIN • dashboard link)
+ * bot.ts – VayaRide Driver Bot (registration • PIN • dashboard link)
  * --------------------------------------------------------------------
- * • Registration (name → phone → documents)
- * • Approval → 4‑digit PIN (24 h) → dashboard link
- * • /status   /newpin commands
+ *  • Registration (name → phone → documents)
+ *  • Approval → 4-digit PIN (24 h) → dashboard link
+ *  • /status   /newpin   /reset   /help commands
  *********************************************************************/
 
 import TelegramBot, { Message }      from 'node-telegram-bot-api';
@@ -97,8 +97,8 @@ bot.onText(/^\/status$/, async msg => {
 
   bot.sendMessage(
     chat,
-    `📋 Name: ${d.fullName}\n` +
-    `📱 Phone: ${d.phone}\n` +
+    `📋 Name: ${d.fullName ?? '—'}\n` +
+    `📱 Phone: ${d.phone ?? '—'}\n` +
     `📄 Docs: ${d.documentsComplete ? '✅ Complete' : '❌ Incomplete'}\n` +
     `🔖 Status: ${d.status.toUpperCase()}`,
     mainMenu(d)
@@ -112,15 +112,34 @@ bot.onText(/^\/newpin$/, async msg => {
   d.pin = undefined;
   await d.save();
   session.set(chat,'set_pin');
-  bot.sendMessage(chat,'🔄 Send a new 4‑digit PIN (example 2468)');
+  bot.sendMessage(chat,'🔄 Send a new 4-digit PIN (example 2468)');
 });
+
+bot.onText(/^\/reset$/, async msg => {
+  const chat = String(msg.chat.id);
+  await Driver.deleteOne({ chatId: chat });
+  session.delete(chat);
+  bot.sendMessage(chat,'🔄 Registration data cleared. Send /start to begin again.');
+});
+
+bot.onText(/^\/help$/, msg =>
+  bot.sendMessage(
+    msg.chat.id,
+    '🆘 *Help*\n' +
+    '/start – begin registration\n' +
+    '/status – show current info\n' +
+    '/newpin – generate a new 4-digit PIN\n' +
+    '/reset – wipe registration and start over',
+    { parse_mode: 'Markdown' }
+  )
+);
 
 /* ------------------------------------------------------------------ */
 /* 5 ▸  Helper: document intro text                                   */
 /* ------------------------------------------------------------------ */
 const docsIntro = () =>
   '📑 *Document Upload*\n' +
-  'Send each item *one‑by‑one* in this order:\n\n' +
+  'Send each item *one-by-one* in this order:\n\n' +
   DOC_KEYS.map((k,i)=>`${i+1}. ${nice[k]}`).join('\n') +
   '\n\nI’ll prompt you after each upload.';
 
@@ -128,7 +147,7 @@ const docsIntro = () =>
 /* 6 ▸  Main message handler                                          */
 /* ------------------------------------------------------------------ */
 bot.on('message', async (m: Message) => {
-  /* ignore non‑files / commands */
+  /* ignore non-files / commands */
   if (!m.text && !m.document && !m.photo) return;
   if (m.text?.startsWith('/')) return;
 
@@ -143,7 +162,7 @@ bot.on('message', async (m: Message) => {
   if (step === 'name' && m.text) {
     const name = m.text.trim();
     if (name.length < 2 || name.length > 50)
-      return bot.sendMessage(chat,'❌ Name must be 2–50 chars.');
+      return bot.sendMessage(chat,'❌ Name must be 2–50 chars.');
     d.fullName = name;
     d.registrationStep = 'phone';
     await d.save();
@@ -169,24 +188,30 @@ bot.on('message', async (m: Message) => {
   /* ---------- 3) DOCUMENTS -------------------------------------- */
   if (step === 'docs') {
     if (!m.photo && !m.document) return;
-    const nextKey = DOC_KEYS.find(k=>!d.documents[k]);
+    const nextKey = DOC_KEYS.find(k => !d.documents[k]);
     if (!nextKey) return;   // shouldn’t happen
 
     /* a) Telegram file URL */
-    const fileId = m.document?.file_id ?? m.photo![m.photo!.length-1].file_id;
+    const fileId = m.document?.file_id ??
+                   m.photo![m.photo!.length - 1].file_id;
     let tgUrl: string;
-    try { tgUrl = await bot.getFileLink(fileId); }
-    catch { return bot.sendMessage(chat,'❌ Could not fetch file from Telegram.'); }
+    try {
+      tgUrl = await bot.getFileLink(fileId);
+    } catch {
+      return bot.sendMessage(chat, '❌ Could not fetch file from Telegram.');
+    }
 
-    /* b) download (5 s) */
+    /* b) download (5 s) */
     let tgResp;
     try {
       const ctrl = new AbortController();
-      const t = setTimeout(()=>ctrl.abort(),5000);
-      tgResp = await fetch(tgUrl,{ signal: ctrl.signal });
+      const t = setTimeout(() => ctrl.abort(), 5000);
+      tgResp = await fetch(tgUrl, { signal: ctrl.signal });
       clearTimeout(t);
       if (!tgResp.ok) throw 0;
-    } catch { return bot.sendMessage(chat,'❌ Telegram download timed‑out.'); }
+    } catch {
+      return bot.sendMessage(chat, '❌ Telegram download timed-out.');
+    }
 
     /* c) choose Cloudinary resource_type */
     const mime = m.document?.mime_type;
@@ -200,49 +225,56 @@ bot.on('message', async (m: Message) => {
         resType = 'raw';     // PDFs must use "raw"
         break;
       default:
-        return bot.sendMessage(chat,
-          '❌ Unsupported file type. Only JPG/PNG and PDF are allowed.');
+        return bot.sendMessage(
+          chat,
+          '❌ Unsupported file type. Only JPG/PNG and PDF are allowed.'
+        );
     }
 
-   
- /* d) Cloudinary upload — retry once with buffer ------------------ */
-let upload: any;
-try {
-  const mime = m.document?.mime_type ??
-               (m.photo ? 'image/jpeg' : 'application/octet-stream');
+    /* d) Cloudinary upload – buffer → upload_stream -------------- */
+    let upload: any;
+    try {
+      // read the entire Telegram response into a Buffer (≤ 20 MB)
+      const buf = Buffer.from(await tgResp.arrayBuffer());
 
-  const buf      = Buffer.from(await tgResp.arrayBuffer());
-  const dataUri  = `data:${mime};base64,${buf.toString('base64')}`;
+      upload = await new Promise((res, rej) => {
+        const stream = cloud.uploader.upload_stream(
+          {
+            folder: `vayaride/${chat}`,
+            public_id: nextKey,
+            resource_type: resType,
+            timeout: 180_000                // 3 min
+          },
+          (err, result) => (err ? rej(err) : res(result))
+        );
 
-  upload = await cloud.uploader.upload(dataUri, {
-    folder: `vayaride/${chat}`,
-    public_id: nextKey,
-    resource_type: resType,
-    timeout: 180_000               // 3 min
-  });
-} catch (err) {
-  console.error('[DOC] Cloudinary error:', err);
-  const msg = (err as any)?.message ?? 'Upload failed (Cloudinary)';
-  return bot.sendMessage(chat, `❌ ${msg}`);
-}
-
+        stream.end(buf);                    // send buffer to Cloudinary
+      });
+    } catch (err) {
+      console.error('[DOC] Cloudinary error:', err);
+      const msg = (err as any)?.message ?? 'Upload failed (Cloudinary)';
+      return bot.sendMessage(chat, `❌ ${msg}`);
+    }
 
     /* e) Save doc metadata to Mongo */
-    await d.addOrUpdateDocument(nextKey,{
+    await d.addOrUpdateDocument(nextKey, {
       fileId,
-      fileUniqueId: m.document?.file_unique_id ??
-                    m.photo![m.photo!.length-1].file_unique_id,
+      fileUniqueId:
+        m.document?.file_unique_id ??
+        m.photo![m.photo!.length - 1].file_unique_id,
       cloudUrl: upload.secure_url,
       format  : upload.format,
       bytes   : upload.bytes
     });
 
     /* f) Next prompt or finish */
-    const remain = DOC_KEYS.find(k=>!d.documents[k]);
+    const remain = DOC_KEYS.find(k => !d.documents[k]);
     if (remain) {
-      return bot.sendMessage(chat,
+      return bot.sendMessage(
+        chat,
         `✅ *${nice[nextKey]}* received.\nPlease send *${nice[remain]}* next.`,
-        { parse_mode:'Markdown' });
+        { parse_mode: 'Markdown' }
+      );
     }
 
     // all 10 docs collected
@@ -251,13 +283,14 @@ try {
     await d.save();
     session.delete(chat);
 
-    bot.sendMessage(chat,
+    bot.sendMessage(
+      chat,
       '🎉 All documents uploaded! We’ll review and notify you here.',
       mainMenu(d)
     );
   }
 
-  /* ---------- 4) SET 4‑DIGIT PIN -------------------------------- */
+  /* ---------- 4) SET 4-DIGIT PIN -------------------------------- */
   if (step === 'set_pin' && m.text) {
     const pin = m.text.trim();
     if (!/^\d{4}$/.test(pin))
@@ -266,8 +299,9 @@ try {
     d.pin = { hash, expiresAt: Date.now() + 24*60*60*1000 };
     await d.save();
     session.delete(chat);
-    return bot.sendMessage(chat,
-      '✅ PIN saved. It will expire tomorrow at 23:59.',
+    return bot.sendMessage(
+      chat,
+      '✅ PIN saved. It will expire tomorrow at 23:59.',
       mainMenu(d)
     );
   }
@@ -286,7 +320,7 @@ export async function sendApprovalLink (driver: DriverDocument) {
     driver.chatId,
     `🎉 <b>Congratulations ${driver.fullName}!</b>\n\n` +
     `Your application is <b>APPROVED</b>.\n` +
-    `🔑 Before you can log in, create a 4‑digit PIN you’ll use to open the dashboard.\n` +
+    `🔑 Before you can log in, create a 4-digit PIN you’ll use to open the dashboard.\n` +
     `Example: 2468`,
     { parse_mode:'HTML' }
   );
