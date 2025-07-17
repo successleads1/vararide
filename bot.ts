@@ -13,6 +13,7 @@ import fetch                         from 'node-fetch';
 import bcrypt                        from 'bcryptjs';
 
 import { Driver, DriverDocument }    from './models/Driver.js';
+import { escapeHtml }                from './utils/escapeHtml.js';
 
 /* ------------------------------------------------------------------ */
 /* 0 ▸  Cloudinary config                                             */
@@ -316,20 +317,25 @@ export async function sendApprovalLink (driver: DriverDocument) {
   const dashLogin =
     `${process.env.APP_BASE_URL}/driver/login?chat=${driver.chatId}`;
 
-  await bot.sendMessage(
-    driver.chatId,
-    `🎉 <b>Congratulations ${driver.fullName}!</b>\n\n` +
-    `Your application is <b>APPROVED</b>.\n` +
-    `🔑 Before you can log in, create a 4-digit PIN you’ll use to open the dashboard.\n` +
-    `Example: 2468`,
-    { parse_mode:'HTML' }
-  );
+  const body = `
+🎉 <b>Congratulations ${escapeHtml(driver.fullName)}!</b>
 
-  session.set(driver.chatId,'set_pin');   // start PIN step
+Your application is <b>APPROVED</b>.
 
-  await bot.sendMessage(
-    driver.chatId,
-    `👉 Tap here after you’ve set your PIN:\n${dashLogin}`,
-    { disable_web_page_preview:true }
-  );
+🔑 Before you can log in, create a 4-digit PIN you’ll use to open the dashboard.
+Example: <code>2468</code>
+  `.trim();
+
+  try {
+    await bot.sendMessage(driver.chatId, body, { parse_mode:'HTML' });
+    session.set(driver.chatId,'set_pin');
+
+    await bot.sendMessage(
+      driver.chatId,
+      `👉 Tap here after you’ve set your PIN:\n${dashLogin}`,
+      { disable_web_page_preview:true }
+    );
+  } catch (err) {
+    console.error('[APPROVAL]', err);
+  }
 }
