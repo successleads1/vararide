@@ -1,10 +1,18 @@
+// backend/utils/escapeHtml.ts
+
 /**
- * escapeHtml – replace the five characters that break Telegram’s HTML parse
+ * Escape text so it’s safe to embed inside HTML tags
+ * (e.g. inside <b>…</b> in Telegram messages).
  */
-export const escapeHtml = (s = ''): string =>
-  s
-    .replace(/&/g,  '&amp;')
-    .replace(/</g,  '&lt;')
-    .replace(/>/g,  '&gt;')
-    .replace(/"/g,  '&quot;')
-    .replace(/'/g,  '&#039;');
+export function escapeHtml(str: string): string {
+  return str.replace(/[&<>"']/g, char => {
+    switch (char) {
+      case '&':  return '&amp;'
+      case '<':  return '&lt;'
+      case '>':  return '&gt;'
+      case '"':  return '&quot;'
+      case "'":  return '&#39;'
+      default:   return char
+    }
+  })
+}
