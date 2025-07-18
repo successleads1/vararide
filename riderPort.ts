@@ -2,6 +2,7 @@
 
 import 'dotenv/config'
 import TelegramBot, { Message, CallbackQuery, Update } from 'node-telegram-bot-api'
+
 import { Driver }                from './models/Driver'
 import { TripRequest, TripRequestDocument } from './models/TripRequest'
 
@@ -11,6 +12,12 @@ import { TripRequest, TripRequestDocument } from './models/TripRequest'
 const riderBot = new TelegramBot(process.env.RIDER_BOT_TOKEN!, {
   polling: false
 })
+
+// Poll in dev so /start & /ride work immediately:
+if (process.env.NODE_ENV !== 'production') {
+  riderBot.startPolling()
+  console.log('⚡ rider bot polling started')
+}
 
 /*─────────────────────────────────────────────────────────────────────*/
 /* 2 ▸ /start & /help for riders                                       */
@@ -35,13 +42,13 @@ riderBot.onText(/^\/help$/, msg =>
 )
 
 /*─────────────────────────────────────────────────────────────────────*/
-/* 3 ▸ Ride session state machine                                      */
+/* 3 ▸ Ride‑request state                                              */
 /*─────────────────────────────────────────────────────────────────────*/
 type RideStep = 'ask_name' | 'ask_cname' | 'ask_dropoff' | 'ask_location'
 const rideSession = new Map<string,RideStep>()
 
 /*─────────────────────────────────────────────────────────────────────*/
-/* 4 ▸ /ride – kick off flow                                            */
+/* 4 ▸ /ride – kick off booking                                         */
 /*─────────────────────────────────────────────────────────────────────*/
 riderBot.onText(/^\/ride$/, msg => {
   const chat = String(msg.chat.id)
@@ -74,7 +81,7 @@ riderBot.on('message', async msg => {
 
     case 'ask_cname':
       await TripRequest.findOneAndUpdate(
-        { riderChatId:chat,status:'pending',riderCName:{$exists:false}},
+        { riderChatId:chat,status:'pending',riderCName:{$exists:false} },
         { riderCName:msg.text!.trim() }
       )
       rideSession.set(chat,'ask_dropoff')
@@ -82,7 +89,7 @@ riderBot.on('message', async msg => {
 
     case 'ask_dropoff':
       await TripRequest.findOneAndUpdate(
-        { riderChatId:chat,status:'pending',dropoff:{$exists:false}},
+        { riderChatId:chat,status:'pending',dropoff:{$exists:false} },
         { dropoff:msg.text!.trim() }
       )
       rideSession.set(chat,'ask_location')
@@ -105,7 +112,10 @@ riderBot.on('message', async msg => {
       }
       const { latitude:lat, longitude:lon } = msg.location
       const trip = await TripRequest.findOneAndUpdate(
-        { riderChatId:chat,status:'pending',dropoff:{$exists:true},'pickup.lat':{$exists:false} },
+        {
+          riderChatId:chat, status:'pending',
+          dropoff:{$exists:true}, 'pickup.lat':{$exists:false}
+        },
         { pickup:{lat,lon} },
         { new:true }
       ) as TripRequestDocument
@@ -130,7 +140,7 @@ riderBot.on('message', async msg => {
 })
 
 /*─────────────────────────────────────────────────────────────────────*/
-/* 6 ▸ Handle “Accept” & notify both sides                            */
+/* 6 ▸ Handle “Accept” & notify                                        */
 /*─────────────────────────────────────────────────────────────────────*/
 riderBot.on('callback_query', async cq => {
   if (!cq.data?.startsWith('accept:')) return
@@ -154,7 +164,7 @@ riderBot.on('callback_query', async cq => {
 })
 
 /*─────────────────────────────────────────────────────────────────────*/
-/* 7 ▸ Relay live‑location updates                                    */
+/* 7 ▸ Relay live‑location updates                                     */
 /*─────────────────────────────────────────────────────────────────────*/
 riderBot.on('message', async m => {
   if (!m.location) return
@@ -171,7 +181,7 @@ riderBot.on('message', async m => {
 })
 
 /*─────────────────────────────────────────────────────────────────────*/
-/* 8 ▸ Named export for your server.ts webhook setup                  */
+/* 8 ▸ Named export for server.ts                                      */
 /*─────────────────────────────────────────────────────────────────────*/
 export const RiderPort = {
   processUpdate: (u:Update) => riderBot.processUpdate(u),

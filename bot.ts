@@ -25,6 +25,12 @@ export const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN!, {
   polling: false
 })
 
+// Poll in dev so /start works without webhooks:
+if (process.env.NODE_ENV !== 'production') {
+  bot.startPolling()
+  console.log('⚡ driver bot polling started')
+}
+
 /*─────────────────────────────────────────────────────────────────────*/
 /* 2 ▸ Session bookkeeping for driver registration                    */
 /*─────────────────────────────────────────────────────────────────────*/
@@ -93,7 +99,7 @@ bot.onText(/^\/help$/, msg =>
 )
 
 /*─────────────────────────────────────────────────────────────────────*/
-/* 6 ▸ Core driver flows: /start flows into registration…             */
+/* 6 ▸ Core driver flows                                                */
 /*─────────────────────────────────────────────────────────────────────*/
 bot.onText(/^\/status$/, async msg => {
   const chat = String(msg.chat.id)
@@ -234,7 +240,7 @@ bot.on('message', async (m:Message) => {
 })
 
 /*─────────────────────────────────────────────────────────────────────*/
-/* 8 ▸ sendApprovalLink – called by your admin API                   */
+/* 8 ▸ sendApprovalLink – called by admin API                         */
 /*─────────────────────────────────────────────────────────────────────*/
 export async function sendApprovalLink(driver:DriverDocument) {
   if (!driver.chatId) return
@@ -242,8 +248,7 @@ export async function sendApprovalLink(driver:DriverDocument) {
   await bot.sendMessage(
     driver.chatId,
     `🎉 <b>Congratulations ${escapeHtml(driver.fullName)}!</b>\n\n`+
-    `Your application is <b>APPROVED</b>.\n`+
-    `🔑 Create your 4‑digit PIN now.`,
+    `Your application is <b>APPROVED</b>.\n🔑 Create your 4‑digit PIN now.`,
     { parse_mode:'HTML' }
   )
   session.set(driver.chatId,'set_pin')

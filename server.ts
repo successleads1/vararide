@@ -3,8 +3,7 @@
  *  server.ts – Express + Socket.io + Telegram bot backend
  *  --------------------------------------------------------------
  *  • Production  → uses TELEGRAM_WEBHOOK_URL & RIDER_WEBHOOK_URL
- *  • Development → if DEV_TUNNEL === "localtunnel", spins up an
- *                  HTTPS tunnel with the localtunnel package
+ *  • Development → spins up localtunnel (if DEV_TUNNEL=localtunnel)
  ******************************************************************/
 
 import express          from 'express';
@@ -18,9 +17,6 @@ import { bot, sendApprovalLink } from './bot.js';
 import { RiderPort }      from './riderPort.js';
 import { Driver }         from './models/Driver.js';
 
-/* -------------------------------------------------------------- */
-/* 0 ▸  Env + sanity checks                                       */
-/* -------------------------------------------------------------- */
 const {
   PORT = '4000',
   PUBLIC_SOCKET_ORIGIN = '*',
@@ -31,7 +27,7 @@ const {
   MONGODB_URI
 } = process.env;
 
-console.log('🟢 Starting server on PORT =', PORT);
+console.log(`🟢 Starting server in ${NODE_ENV} mode on PORT = ${PORT}`);
 
 if (!MONGODB_URI) {
   console.error('❌  MONGODB_URI missing');
@@ -41,6 +37,8 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
   console.error('❌  TELEGRAM_BOT_TOKEN missing');
   process.exit(1);
 }
+
+// Only require these in prod
 if (NODE_ENV === 'production') {
   if (!TELEGRAM_WEBHOOK_URL) {
     console.error('❌  TELEGRAM_WEBHOOK_URL missing');
@@ -52,15 +50,11 @@ if (NODE_ENV === 'production') {
   }
 }
 
-/* -------------------------------------------------------------- */
-/* 1 ▸  Helper – open localtunnel only while developing           */
-/* -------------------------------------------------------------- */
 async function openTunnel(maxTries = 4) {
   if (NODE_ENV === 'production' || DEV_TUNNEL !== 'localtunnel') return null;
   const { default: localtunnel } = await import('localtunnel');
   const optsBase = { port: +PORT, subdomain: process.env.LT_SUBDOMAIN };
   const hosts = ['https://loca.lt', 'https://localtunnel.me'];
-
   for (const host of hosts) {
     for (let i = 1; i <= maxTries; i++) {
       try {
@@ -70,7 +64,7 @@ async function openTunnel(maxTries = 4) {
         console.log('🔗  localtunnel url:', tunnel.url);
         return tunnel;
       } catch (err: any) {
-        console.error(`   ✖︎ failed (${err?.message ?? err})`);
+        console.error(`   ✖︎ failed (${err.message ?? err})`);
         await new Promise(r => setTimeout(r, 2000));
       }
     }
@@ -78,25 +72,22 @@ async function openTunnel(maxTries = 4) {
   return null;
 }
 
-/* -------------------------------------------------------------- */
-/* 2 ▸  Bootstrap                                                 */
-/* -------------------------------------------------------------- */
-(async () => {
-  /* MongoDB */
+;(async () => {
+  // ── Connect DB
   await connectDB();
   console.log('✅  MongoDB connected');
 
-  /* Express */
+  // ── Express + Routes
   const app = express();
   app.use(express.json({ limit: '10mb' }));
 
-  // Driver bot updates
+  // Driver webhook endpoint
   app.post('/telegram/webhook',
     express.json({ limit: '10mb' }),
     telegramRouter
   );
 
-  // Rider bot updates
+  // Rider webhook endpoint
   app.post('/telegram/rider-webhook',
     express.json({ limit: '10mb' }),
     async (req, res) => {
@@ -104,32 +95,31 @@ async function openTunnel(maxTries = 4) {
         await RiderPort.processUpdate(req.body);
         res.sendStatus(200);
       } catch (err) {
-        console.error('rider‑webhook failed:', err);
+        console.error('rider‑webhook error:', err);
         res.sendStatus(500);
       }
     }
   );
 
-  // Admin helper – push dashboard link when driver approved
+  // Admin notify‑approval
   app.post('/admin/notify-approval', async (req, res) => {
     try {
       const { driverId } = req.body;
-      if (!driverId) return res.status(400).json({ error: 'driverId is required' });
+      if (!driverId) return res.status(400).json({ error: 'driverId required' });
 
       const d = await Driver.findById(driverId);
       if (!d) return res.status(404).json({ error: 'Driver not found' });
 
-      d.status = 'approved';
-      await d.save();
+      d.status = 'approved'; await d.save();
       await sendApprovalLink(d);
       res.json({ success: true });
     } catch (err) {
-      console.error('notify‑approval failed:', err);
+      console.error('notify-approval error:', err);
       res.status(500).json({ error: 'Internal error' });
     }
   });
 
-  /* HTTP + Socket.io */
+  // ── HTTP + Socket.io
   const http = createServer(app);
   const io   = new IO(http, { cors: { origin: PUBLIC_SOCKET_ORIGIN } });
 
@@ -138,55 +128,47 @@ async function openTunnel(maxTries = 4) {
     socket.on('disconnect', () => console.log('⚡ Socket disconnected:', socket.id));
   });
 
-  // Bind to our port
   http.listen(Number(PORT), () =>
     console.log(`> backend running on http://localhost:${PORT}`)
   );
 
-  /* -------------------------------------------------------------- */
-  /* 3 ▸ Telegram webhook registration (only if needed)            */
-  /* -------------------------------------------------------------- */
+  // ── Webhook registration
+  if (NODE_ENV === 'production') {
+    // Driver bot
+    try {
+      const info = await bot.getWebHookInfo();
+      if (info.url !== TELEGRAM_WEBHOOK_URL) {
+        console.log('→ setting production driver webhook…');
+        await bot.setWebHook(TELEGRAM_WEBHOOK_URL!);
+      } else {
+        console.log('✔︎ driver webhook already set');
+      }
+    } catch (err: any) {
+      if (err.response?.statusCode === 429) {
+        console.warn('⚠️  driver setWebHook rate‑limited');
+      } else {
+        console.error('❌ driver setWebHook error:', err);
+      }
+    }
 
-  // Driver bot webhook
-  try {
-    const info = await bot.getWebHookInfo();
-    if (info.url !== TELEGRAM_WEBHOOK_URL) {
-      console.log('→ updating driver webhook…');
-      await bot.setWebHook(TELEGRAM_WEBHOOK_URL!);
-      console.log('✅ driver webhook set to', TELEGRAM_WEBHOOK_URL);
-    } else {
-      console.log('✔︎ driver webhook already set, skipping');
+    // Rider bot
+    try {
+      const info = await bot.getWebHookInfo(); // or riderBot.getWebHookInfo() if separate
+      if (info.url !== RIDER_WEBHOOK_URL) {
+        console.log('→ setting production rider webhook…');
+        await RiderPort.setWebHook(RIDER_WEBHOOK_URL!);
+      } else {
+        console.log('✔︎ rider webhook already set');
+      }
+    } catch (err: any) {
+      if (err.response?.statusCode === 429) {
+        console.warn('⚠️  rider setWebHook rate‑limited');
+      } else {
+        console.error('❌ rider setWebHook error:', err);
+      }
     }
-  } catch (err: any) {
-    if (err.response?.statusCode === 429) {
-      console.warn('⚠️  driver setWebHook rate‑limited, skipping');
-    } else {
-      console.error('❌ driver setWebHook error:', err);
-    }
-  }
-
-  // Rider bot webhook
-  try {
-    const info = await bot.getWebHookInfo(); // note: single bot instance; if separate, you'd fetch from riderBot
-    if (info.url !== RIDER_WEBHOOK_URL) {
-      console.log('→ updating rider webhook…');
-      await RiderPort.setWebHook(RIDER_WEBHOOK_URL!);
-      console.log('✅ rider webhook set to', RIDER_WEBHOOK_URL);
-    } else {
-      console.log('✔︎ rider webhook already set, skipping');
-    }
-  } catch (err: any) {
-    if (err.response?.statusCode === 429) {
-      console.warn('⚠️  rider setWebHook rate‑limited, skipping');
-    } else {
-      console.error('❌ rider setWebHook error:', err);
-    }
-  }
-
-  /* -------------------------------------------------------------- */
-  /* 4 ▸  Dev‑mode localtunnel unit tests                           */
-  /* -------------------------------------------------------------- */
-  if (NODE_ENV !== 'production') {
+  } else {
+    // ── Development: open localtunnel & register dev webhooks
     const tunnel = await openTunnel();
     if (tunnel) {
       const driverUrl = `${tunnel.url}/telegram/webhook`;
@@ -200,7 +182,7 @@ async function openTunnel(maxTries = 4) {
         console.error('❌ dev setWebHook failed:', err);
       }
     } else {
-      console.warn('‼️  Could not open localtunnel – webhooks won’t auto‑register.');
+      console.warn('‼️  Could not open localtunnel – webhooks won’t auto‑register');
     }
   }
 })();
