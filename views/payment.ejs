@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Payment</title>
+</head>
+<body>
+  <h1>Complete Your Payment</h1>
+  <p>To complete your payment of <%= amount %> ZAR, please choose a payment method:</p>
+  <p><a href="<%= paymentLink %>">Click here to pay via PayFast</a></p>
+
+  <h2>Payment Methods</h2>
+  <form action="/payment" method="POST">
+    <label for="payment_method">Choose a payment method:</label><br><br>
+    <input type="radio" id="cash" name="payment_method" value="cash">
+    <label for="cash">Cash</label><br><br>
+    <input type="radio" id="card" name="payment_method" value="card">
+    <label for="card">Credit/Debit Card</label><br><br>
+    <input type="radio" id="credits" name="payment_method" value="credits">
+    <label for="credits">Add Credit</label><br><br>
+    <input type="submit" value="Pay">
+  </form>
+</body>
+</html>

@@ -1,11 +1,12 @@
+// backend/bot.ts
+
 import 'dotenv/config';
-import TelegramBot, { Message, CallbackQuery } from 'node-telegram-bot-api';
-import { v2 as cloudinary } from 'cloudinary';
+import TelegramBot from 'node-telegram-bot-api';
 import fetch from 'node-fetch';
 import bcrypt from 'bcryptjs';
-
 import { Driver, DriverDocument } from './models/Driver';
 import { escapeHtml } from './utils/escapeHtml';
+import { v2 as cloudinary } from 'cloudinary';
 
 // ────────────────────────────────────────────────────────────────────
 // 0) Cloudinary configuration
@@ -152,7 +153,7 @@ bot.onText(/^\/pay$/, async msg => {
     }
 
     // Payment link sent to user
-    return bot.sendMessage(chat, `💳 To complete your payment of ${amountToPay} ZAR, please follow the link provided in the previous message.`);
+    return bot.sendMessage(chat, `💳 To complete your payment of ${amountToPay} ZAR, please follow this link: ${data.paymentLink}`);
   } catch (error) {
     console.error(error);
     return bot.sendMessage(chat, '❌ An error occurred while processing your payment request.');
@@ -165,12 +166,12 @@ bot.onText(/^\/pay$/, async msg => {
 const docsIntro = () =>
   '📑 *Document Upload*\n' +
   'Send each item one‑by‑one in this order:\n\n' +
-  DOC_KEYS.map((k,i) => `${i+1}. ${nice[k]}`).join('\n') +
+  DOC_KEYS.map((k, i) => `${i + 1}. ${nice[k]}`).join('\n') +
   '\n\nI’ll prompt after each upload.';
 
 bot.on('message', async (m: Message) => {
   if ((m.text?.startsWith('/')) || (!m.text && !m.photo && !m.document)) return;
-  
+
   const chat = String(m.chat.id);
   const step = session.get(chat);
   if (!step) return;
