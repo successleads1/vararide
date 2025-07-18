@@ -10,7 +10,6 @@
 import express          from 'express';
 import { createServer } from 'http';
 import { Server as IO } from 'socket.io';
-import fetch            from 'node-fetch';
 import 'dotenv/config';
 
 import { connectDB }      from './db.js';
@@ -139,48 +138,69 @@ async function openTunnel(maxTries = 4) {
     socket.on('disconnect', () => console.log('⚡ Socket disconnected:', socket.id));
   });
 
-  // ✅ THIS LINE ENSURES YOUR APP BINDS TO A PORT
+  // Bind to our port
   http.listen(Number(PORT), () =>
     console.log(`> backend running on http://localhost:${PORT}`)
   );
 
   /* -------------------------------------------------------------- */
-  /* 3 ▸ Telegram webhook registration                             */
+  /* 3 ▸ Telegram webhook registration (only if needed)            */
   /* -------------------------------------------------------------- */
 
-  if (NODE_ENV === 'production') {
-    try {
-      console.log('→ setting production webhooks…');
+  // Driver bot webhook
+  try {
+    const info = await bot.getWebHookInfo();
+    if (info.url !== TELEGRAM_WEBHOOK_URL) {
+      console.log('→ updating driver webhook…');
       await bot.setWebHook(TELEGRAM_WEBHOOK_URL!);
-      await RiderPort.setWebHook(RIDER_WEBHOOK_URL!);
-      console.log('✅ production webhooks set');
-    } catch (err) {
-      console.error('❌ setWebhook (prod) failed:', err);
+      console.log('✅ driver webhook set to', TELEGRAM_WEBHOOK_URL);
+    } else {
+      console.log('✔︎ driver webhook already set, skipping');
+    }
+  } catch (err: any) {
+    if (err.response?.statusCode === 429) {
+      console.warn('⚠️  driver setWebHook rate‑limited, skipping');
+    } else {
+      console.error('❌ driver setWebHook error:', err);
     }
   }
 
+  // Rider bot webhook
+  try {
+    const info = await bot.getWebHookInfo(); // note: single bot instance; if separate, you'd fetch from riderBot
+    if (info.url !== RIDER_WEBHOOK_URL) {
+      console.log('→ updating rider webhook…');
+      await RiderPort.setWebHook(RIDER_WEBHOOK_URL!);
+      console.log('✅ rider webhook set to', RIDER_WEBHOOK_URL);
+    } else {
+      console.log('✔︎ rider webhook already set, skipping');
+    }
+  } catch (err: any) {
+    if (err.response?.statusCode === 429) {
+      console.warn('⚠️  rider setWebHook rate‑limited, skipping');
+    } else {
+      console.error('❌ rider setWebHook error:', err);
+    }
+  }
+
+  /* -------------------------------------------------------------- */
+  /* 4 ▸  Dev‑mode localtunnel unit tests                           */
+  /* -------------------------------------------------------------- */
   if (NODE_ENV !== 'production') {
     const tunnel = await openTunnel();
     if (tunnel) {
       const driverUrl = `${tunnel.url}/telegram/webhook`;
       const riderUrl  = `${tunnel.url}/telegram/rider-webhook`;
       try {
+        console.log('→ setting dev webhooks to', { driverUrl, riderUrl });
         await bot.setWebHook(driverUrl);
         await RiderPort.setWebHook(riderUrl);
-        console.log('→ setWebhook (dev):', { driverUrl, riderUrl });
+        console.log('✅ dev webhooks set');
       } catch (err) {
-        console.error('❌ setWebhook (dev) failed:', err);
+        console.error('❌ dev setWebHook failed:', err);
       }
-
-      const cleanup = async () => {
-        console.log('\n↩  Closing localtunnel…');
-        try { await tunnel.close(); } catch {}
-        process.exit(0);
-      };
-      process.once('SIGINT', cleanup);
-      process.once('SIGTERM', cleanup);
     } else {
-      console.warn('‼️  Could not establish localtunnel – webhooks won’t auto-register.');
+      console.warn('‼️  Could not open localtunnel – webhooks won’t auto‑register.');
     }
   }
 })();
