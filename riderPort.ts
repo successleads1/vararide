@@ -1,115 +1,188 @@
-// backend/riderPort.ts
-import TelegramBot from 'node-telegram-bot-api';
-import { TripRequest } from './models/TripRequest';
-import { Driver }      from './models/Driver';
+// backend/rider-bot.ts
 
-// instantiate with your Rider token
-export const RiderPort = new TelegramBot(
-  process.env.RIDER_PORT_TOKEN!,
+import 'dotenv/config'
+import TelegramBot, { Message, CallbackQuery } from 'node-telegram-bot-api'
+import fetch                                  from 'node-fetch'
+
+import { Driver, DriverDocument }           from './models/Driver'
+import { TripRequest, TripRequestDocument } from './models/TripRequest'
+
+/* ------------------------------------------------------------------
+ * 1) Telegram bot instance for riders
+ * ------------------------------------------------------------------ */
+export const riderBot = new TelegramBot(
+  process.env.RIDER_BOT_TOKEN!,
   { polling: false }
-);
+)
 
-type RideStep = 'ask_name' | 'ask_dropoff' | 'ask_location';
-const rideSession = new Map<string, RideStep>();
+/* ------------------------------------------------------------------
+ * 2) Ride‑request session state
+ * ------------------------------------------------------------------ */
+type RideStep = 'ask_name' | 'ask_cname' | 'ask_dropoff' | 'ask_location'
+const rideSession = new Map<string, RideStep>()
 
-// 1) /ride → ask name
-RiderPort.onText(/^\/ride$/, async msg => {
-  const chat = String(msg.chat.id);
-  rideSession.set(chat, 'ask_name');
-  await RiderPort.sendMessage(
+/* ------------------------------------------------------------------
+ * 3) /ride → kick off booking flow
+ * ------------------------------------------------------------------ */
+riderBot.onText(/^\/ride$/, msg => {
+  const chat = String(msg.chat.id)
+  rideSession.set(chat,'ask_name')
+  return riderBot.sendMessage(
     chat,
-    '🚕 *Book a ride*\nWhat’s your name?',
-    { parse_mode: 'Markdown' }
-  );
-});
+    '🚕 *Book a ride*\nWhat’s your *name*?',
+    { parse_mode:'Markdown' }
+  )
+})
 
-// 2) collect name → dropoff → location
-RiderPort.on('message', async msg => {
-  const chat = String(msg.chat.id);
-  const step = rideSession.get(chat);
-  if (!step) return;
-  if (!msg.text && !msg.location) return;
+/* ------------------------------------------------------------------
+ * 4) Collect name, contact, dropoff, then location
+ * ------------------------------------------------------------------ */
+riderBot.on('message', async msg => {
+  const chat = String(msg.chat.id)
+  const step = rideSession.get(chat)
+  if (!step) return
+  if (!msg.text && !msg.location) return
 
   switch (step) {
     case 'ask_name':
       await TripRequest.create({
         riderChatId: chat,
-        riderName:   msg.text!,
-        pickup:      { lat: 0, lon: 0 },
-      });
-      rideSession.set(chat, 'ask_dropoff');
-      return RiderPort.sendMessage(chat, 'Where would you like to go?');
+        riderName:   msg.text!.trim(),
+        status:      'pending'
+      })
+      rideSession.set(chat,'ask_cname')
+      return riderBot.sendMessage(chat,
+        `📞 Thanks, *${msg.text!.trim()}*! Now send your *contact number*:`,
+        { parse_mode:'Markdown', reply_markup:{ remove_keyboard:true } }
+      )
+
+    case 'ask_cname':
+      await TripRequest.findOneAndUpdate(
+        { riderChatId: chat, status:'pending', riderCName:{$exists:false} },
+        { riderCName: msg.text!.trim() }
+      )
+      rideSession.set(chat,'ask_dropoff')
+      return riderBot.sendMessage(chat,
+        '🏁 Where would you like to go? (e.g. “123 Main St”)',
+        { parse_mode:'Markdown' }
+      )
 
     case 'ask_dropoff':
       await TripRequest.findOneAndUpdate(
-        { riderChatId: chat, status: 'pending', 'pickup.lat': 0 },
-        { dropoff: msg.text! }
-      );
-      rideSession.set(chat, 'ask_location');
-      return RiderPort.sendMessage(
-        chat,
-        'Please *share your current location*:',
+        { riderChatId: chat, status:'pending', dropoff:{$exists:false} },
+        { dropoff: msg.text!.trim() }
+      )
+      rideSession.set(chat,'ask_location')
+      return riderBot.sendMessage(chat,
+        '📍 Please *share your live location* so drivers can find you:',
         {
-          parse_mode: 'Markdown',
-          reply_markup: {
-            keyboard: [[{ text: 'Send location 📍', request_location: true }]],
-            one_time_keyboard: true
+          parse_mode:'Markdown',
+          reply_markup:{
+            keyboard:[[ { text:'Send location 📍', request_location:true } ]],
+            one_time_keyboard:true,
+            resize_keyboard:true
           }
         }
-      );
+      )
 
     case 'ask_location':
       if (!msg.location) {
-        return RiderPort.sendMessage(chat, '❌ Tap “Send location 📍”');
+        return riderBot.sendMessage(chat,'❌ Tap “Send location 📍”')
       }
-      const { latitude: lat, longitude: lon } = msg.location!;
+      // save pickup coords
+      const { latitude:lat, longitude:lon } = msg.location
       const trip = await TripRequest.findOneAndUpdate(
-        { riderChatId: chat, status: 'pending', 'pickup.lat': 0 },
-        { 'pickup.lat': lat, 'pickup.lon': lon },
-        { new: true }
-      );
-      rideSession.delete(chat);
+        {
+          riderChatId: chat,
+          status:'pending',
+          dropoff:{$exists:true},
+          'pickup.lat':{$exists:false}
+        },
+        { pickup:{ lat, lon } },
+        { new:true }
+      ) as TripRequestDocument
 
-      await RiderPort.sendMessage(chat, '✅ Got it! Looking for a driver…');
+      rideSession.delete(chat)
+
+      // tell rider we’re searching
+      await riderBot.sendMessage(chat,'⏳ Looking for drivers… please wait.')
 
       // broadcast to all approved drivers
-      const drivers = await Driver.find({ status: 'approved' }).lean();
+      const drivers = await Driver.find({ status:'approved' }).lean()
       for (const d of drivers) {
-        await RiderPort.sendLocation(d.chatId, lat, lon);
-        await RiderPort.sendMessage(
+        await riderBot.sendLocation(d.chatId, lat, lon)
+        await riderBot.sendMessage(
           d.chatId,
-          `🚨 *New ride request*\n👤 ${trip!.riderName}\n📍 Drop:\ ${trip!.dropoff}`,
+          `🚨 *New ride request*\n`+
+          `👤 Rider: ${trip.riderName}\n`+
+          `📞 ${trip.riderCName}\n`+
+          `📍 Dropoff: ${trip.dropoff}`,
           {
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: [[
-                { text: 'Accept ✅', callback_data: `accept:${trip!._id}` }
+            parse_mode:'Markdown',
+            reply_markup:{
+              inline_keyboard:[[
+                { text:'Accept ✅', callback_data:`accept:${trip._id}` }
               ]]
             }
           }
-        );
+        )
       }
-      return;
+      return
   }
-});
+})
 
-// 3) handle “Accept” buttons
-RiderPort.on('callback_query', async cq => {
-  const [ action, tripId ] = cq.data!.split(':');
-  if (action !== 'accept') return;
+/* ------------------------------------------------------------------
+ * 5) Handle driver’s “Accept” button
+ * ------------------------------------------------------------------ */
+riderBot.on('callback_query', async cq => {
+  if (!cq.data?.startsWith('accept:')) return
+  const [ , tripId ] = cq.data.split(':')
+  const driverChat = String(cq.from.id)
 
-  const driverChat = String(cq.from.id);
-  const trip = await TripRequest.findByIdAndUpdate(tripId, {
-    status:       'accepted',
-    driverChatId: driverChat
-  });
-  if (!trip) return RiderPort.answerCallbackQuery(cq.id, '❌ Trip not found');
+  const trip = await TripRequest.findByIdAndUpdate(tripId,{
+    status:'accepted',
+    driverChatId:driverChat
+  }) as TripRequestDocument
 
-  await RiderPort.answerCallbackQuery(cq.id, 'You’ve accepted!');
-  await RiderPort.sendMessage(driverChat, `👍 On your way to ${trip.riderName}`);
-  await RiderPort.sendMessage(
-    trip.riderChatId,
-    `🚗 *Driver is coming!*\nContact: @${cq.from.username || cq.from.first_name}`,
-    { parse_mode: 'Markdown' }
-  );
-});
+  if (!trip) {
+    return riderBot.answerCallbackQuery(cq.id,'❌ Trip not found')
+  }
+
+  // confirm to driver
+  await riderBot.answerCallbackQuery(cq.id,'✅ You accepted!')
+  await riderBot.sendMessage(driverChat,
+    `👍 On your way to pick up *${trip.riderName}*!`,
+    { parse_mode:'Markdown' }
+  )
+
+  // driver → rider
+  const driver = await Driver.findByChatId(driverChat)
+  const info = driver
+    ? `👤 ${driver.fullName}\n📞 ${driver.phone}`
+    : '👤 Details unavailable'
+
+  await riderBot.sendMessage(trip.riderChatId,
+    `🚗 *Driver is coming!*\n${info}`,
+    { parse_mode:'Markdown' }
+  )
+})
+
+/* ------------------------------------------------------------------
+ * 6) Relay live‑location updates from rider → their assigned driver
+ * ------------------------------------------------------------------ */
+riderBot.on('message', async m => {
+  if (!m.location) return
+  const riderChat = String(m.chat.id)
+  const trip = await TripRequest.findOne({
+    riderChatId:riderChat, status:'accepted'
+  }) as TripRequestDocument
+  if (!trip?.driverChatId) return
+
+  // forward live update
+  await riderBot.sendLocation(
+    trip.driverChatId,
+    m.location.latitude,
+    m.location.longitude,
+    m.location.live_period ? { live_period:m.location.live_period } : {}
+  )
+})

@@ -1,29 +1,36 @@
 // backend/models/TripRequest.ts
-import { Schema, model, Document } from 'mongoose';
+
+import mongoose, { Document, Schema } from 'mongoose'
 
 export interface TripRequestDocument extends Document {
-  riderChatId: string;
-  riderName: string;
-  pickup: { lat: number; lon: number };
-  dropoff?: string;
-  status: 'pending' | 'accepted' | 'completed' | 'cancelled';
-  driverChatId?: string;
-  createdAt: Date;
+  riderChatId: string
+  riderName:   string
+  riderCName?: string
+  dropoff?:    string
+  pickup:      { lat?: number; lon?: number }
+  driverChatId?: string
+  status:      'pending' | 'accepted' | 'completed' | 'cancelled'
+  createdAt:   Date
+  updatedAt:   Date
 }
 
-const TripRequest = model<TripRequestDocument>(
-  'TripRequest',
-  new Schema({
-    riderChatId: { type: String, required: true },
-    riderName:   { type: String, required: true },
-    pickup: {
-      lat: { type: Number, required: true },
-      lon: { type: Number, required: true },
-    },
-    dropoff:     String,
-    status:      { type: String, enum: ['pending','accepted','completed','cancelled'], default: 'pending' },
-    driverChatId:String,
-  }, { timestamps: true })
-);
+const TripRequestSchema = new Schema<TripRequestDocument>({
+  riderChatId: { type: String, required: true },
+  riderName:   { type: String, required: true },
+  riderCName:  String,
+  dropoff:     String,
+  pickup: {
+    lat: Number,
+    lon: Number
+  },
+  driverChatId: String,
+  status: {
+    type: String,
+    enum: ['pending','accepted','completed','cancelled'],
+    default: 'pending'
+  }
+}, { timestamps: true })
 
-export { TripRequest };
+export const TripRequest = mongoose.model<TripRequestDocument>(
+  'TripRequest', TripRequestSchema
+)
