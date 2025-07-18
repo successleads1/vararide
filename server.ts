@@ -1,201 +1,186 @@
-// backend/riderPort.ts
+// server.ts – Express + Socket.io + Telegram bot backend
+/******************************************************************
+ *  server.ts – Express + Socket.io + Telegram bot backend
+ *  --------------------------------------------------------------
+ *  • Production  → uses TELEGRAM_WEBHOOK_URL & RIDER_WEBHOOK_URL
+ *  • Development → if DEV_TUNNEL === "localtunnel", spins up an
+ *                  HTTPS tunnel with the localtunnel package
+ ******************************************************************/
 
-import 'dotenv/config'
-import TelegramBot, { Message, CallbackQuery } from 'node-telegram-bot-api'
-import fetch                                  from 'node-fetch'
+import express          from 'express';
+import { createServer } from 'http';
+import { Server as IO } from 'socket.io';
+import fetch            from 'node-fetch';
+import 'dotenv/config';
 
-import { Driver }                from './models/Driver.js'
-import { TripRequest }           from './models/TripRequest.js'
-import { TripRequestDocument }   from './models/TripRequest.js'
+import { connectDB }      from './db.js';
+import { telegramRouter } from './routes/telegram.js';
+import { bot, sendApprovalLink } from './bot.js';
+import { RiderPort }      from './riderPort.js';
+import { Driver }         from './models/Driver.js';
 
-/* ------------------------------------------------------------------
- * 1) Create a separate TelegramBot instance for riders
- * ------------------------------------------------------------------ */
-const bot = new TelegramBot(process.env.RIDER_BOT_TOKEN!, {
-  polling: false
-})
+/* -------------------------------------------------------------- */
+/* 0 ▸  Env + sanity checks                                       */
+/* -------------------------------------------------------------- */
+const {
+  PORT = '4000',
+  PUBLIC_SOCKET_ORIGIN = '*',
+  NODE_ENV,
+  DEV_TUNNEL,
+  TELEGRAM_WEBHOOK_URL,
+  RIDER_WEBHOOK_URL,
+  MONGODB_URI
+} = process.env;
 
-/* ------------------------------------------------------------------
- * 2) Ride‑request session state
- * ------------------------------------------------------------------ */
-type RideStep = 'ask_name' | 'ask_cname' | 'ask_dropoff' | 'ask_location'
-const rideSession = new Map<string, RideStep>()
+console.log('🟢 Starting server on PORT =', PORT);
 
-/* ------------------------------------------------------------------
- * 3) /ride – start the booking flow
- * ------------------------------------------------------------------ */
-bot.onText(/^\/ride$/, msg => {
-  const chat = String(msg.chat.id)
-  rideSession.set(chat, 'ask_name')
-  return bot.sendMessage(
-    chat,
-    '🚕 *Book a ride*\nWhat’s your *name*?',
-    { parse_mode: 'Markdown' }
-  )
-})
-
-/* ------------------------------------------------------------------
- * 4) Collect name → contact → dropoff → live location
- * ------------------------------------------------------------------ */
-bot.on('message', async msg => {
-  const chat = String(msg.chat.id)
-  const step = rideSession.get(chat)
-  if (!step) return
-  if (!msg.text && !msg.location) return
-
-  switch (step) {
-    case 'ask_name':
-      await TripRequest.create({
-        riderChatId: chat,
-        riderName:   msg.text!.trim(),
-        status:      'pending'
-      })
-      rideSession.set(chat, 'ask_cname')
-      return bot.sendMessage(chat,
-        `📞 Thanks, *${msg.text!.trim()}*! Now send your *contact number*:`,
-        { parse_mode:'Markdown', reply_markup:{ remove_keyboard:true } }
-      )
-
-    case 'ask_cname':
-      await TripRequest.findOneAndUpdate(
-        { riderChatId: chat, status:'pending', riderCName:{$exists:false} },
-        { riderCName: msg.text!.trim() }
-      )
-      rideSession.set(chat, 'ask_dropoff')
-      return bot.sendMessage(chat,
-        '🏁 Where would you like to go? (e.g. “123 Main St”)',
-        { parse_mode:'Markdown' }
-      )
-
-    case 'ask_dropoff':
-      await TripRequest.findOneAndUpdate(
-        { riderChatId: chat, status:'pending', dropoff:{$exists:false} },
-        { dropoff: msg.text!.trim() }
-      )
-      rideSession.set(chat, 'ask_location')
-      return bot.sendMessage(chat,
-        '📍 Please *share your live location* so drivers can find you:',
-        {
-          parse_mode:'Markdown',
-          reply_markup:{
-            keyboard:[
-              [{ text:'Send location 📍', request_location:true }]
-            ],
-            one_time_keyboard:true,
-            resize_keyboard:true
-          }
-        }
-      )
-
-    case 'ask_location':
-      if (!msg.location) {
-        return bot.sendMessage(chat,'❌ Tap “Send location 📍”')
-      }
-      const { latitude: lat, longitude: lon } = msg.location
-      const trip = await TripRequest.findOneAndUpdate(
-        {
-          riderChatId: chat,
-          status:'pending',
-          dropoff:{$exists:true},
-          'pickup.lat':{$exists:false}
-        },
-        { pickup:{ lat, lon } },
-        { new:true }
-      ) as TripRequestDocument
-
-      rideSession.delete(chat)
-
-      // tell rider we're searching
-      await bot.sendMessage(chat,'⏳ Looking for drivers… please wait.')
-
-      // broadcast to all approved drivers
-      const drivers = await Driver.find({ status:'approved' }).lean()
-      for (const d of drivers) {
-        await bot.sendLocation(d.chatId, lat, lon)
-        await bot.sendMessage(
-          d.chatId,
-          `🚨 *New ride request*\n`+
-          `👤 Rider: ${trip.riderName}\n`+
-          `📞 ${trip.riderCName}\n`+
-          `📍 Dropoff: ${trip.dropoff}`,
-          {
-            parse_mode:'Markdown',
-            reply_markup:{
-              inline_keyboard:[[
-                { text:'Accept ✅', callback_data:`accept:${trip._id}` }
-              ]]
-            }
-          }
-        )
-      }
-      return
-  }
-})
-
-/* ------------------------------------------------------------------
- * 5) Handle driver "Accept" button
- * ------------------------------------------------------------------ */
-bot.on('callback_query', async cq => {
-  if (!cq.data?.startsWith('accept:')) return
-  const [, tripId] = cq.data.split(':')
-  const driverChat = String(cq.from.id)
-
-  const trip = await TripRequest.findByIdAndUpdate(tripId, {
-    status:'accepted',
-    driverChatId:driverChat
-  }) as TripRequestDocument
-
-  if (!trip) {
-    return bot.answerCallbackQuery(cq.id,'❌ Trip not found')
-  }
-
-  // confirm to driver
-  await bot.answerCallbackQuery(cq.id,'✅ You accepted!')
-  await bot.sendMessage(driverChat,
-    `👍 On your way to pick up *${trip.riderName}*!`,
-    { parse_mode:'Markdown' }
-  )
-
-  // driver → rider
-  const driver = await Driver.findByChatId(driverChat)
-  const info = driver
-    ? `👤 ${driver.fullName}\n📞 ${driver.phone}`
-    : '👤 Details unavailable'
-
-  await bot.sendMessage(trip.riderChatId,
-    `🚗 *Driver is coming!*\n${info}`,
-    { parse_mode:'Markdown' }
-  )
-})
-
-/* ------------------------------------------------------------------
- * 6) Relay live‑location updates from rider → assigned driver
- * ------------------------------------------------------------------ */
-bot.on('message', async m => {
-  if (!m.location) return
-  const riderChat = String(m.chat.id)
-
-  const trip = await TripRequest.findOne({
-    riderChatId:riderChat,
-    status:     'accepted'
-  }) as TripRequestDocument
-  if (!trip?.driverChatId) return
-
-  await bot.sendLocation(
-    trip.driverChatId,
-    m.location.latitude,
-    m.location.longitude,
-    m.location.live_period ? { live_period:m.location.live_period } : {}
-  )
-})
-
-/* ------------------------------------------------------------------
- * Expose the two methods your server.ts expects
- * ------------------------------------------------------------------ */
-export const RiderPort = {
-  setWebHook: (url: string) =>
-    bot.setWebHook(url),
-
-  processUpdate: async (update: any) =>
-    await bot.processUpdate(update)
+if (!MONGODB_URI) {
+  console.error('❌  MONGODB_URI missing');
+  process.exit(1);
 }
+if (!process.env.TELEGRAM_BOT_TOKEN) {
+  console.error('❌  TELEGRAM_BOT_TOKEN missing');
+  process.exit(1);
+}
+if (NODE_ENV === 'production') {
+  if (!TELEGRAM_WEBHOOK_URL) {
+    console.error('❌  TELEGRAM_WEBHOOK_URL missing');
+    process.exit(1);
+  }
+  if (!RIDER_WEBHOOK_URL) {
+    console.error('❌  RIDER_WEBHOOK_URL missing');
+    process.exit(1);
+  }
+}
+
+/* -------------------------------------------------------------- */
+/* 1 ▸  Helper – open localtunnel only while developing           */
+/* -------------------------------------------------------------- */
+async function openTunnel(maxTries = 4) {
+  if (NODE_ENV === 'production' || DEV_TUNNEL !== 'localtunnel') return null;
+  const { default: localtunnel } = await import('localtunnel');
+  const optsBase = { port: +PORT, subdomain: process.env.LT_SUBDOMAIN };
+  const hosts = ['https://loca.lt', 'https://localtunnel.me'];
+
+  for (const host of hosts) {
+    for (let i = 1; i <= maxTries; i++) {
+      try {
+        console.log(`🌍  localtunnel (${host}) attempt ${i} …`);
+        const tunnel = await localtunnel({ ...optsBase, host });
+        tunnel.on('error', e => console.warn('localtunnel socket error →', e.message));
+        console.log('🔗  localtunnel url:', tunnel.url);
+        return tunnel;
+      } catch (err: any) {
+        console.error(`   ✖︎ failed (${err?.message ?? err})`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
+  return null;
+}
+
+/* -------------------------------------------------------------- */
+/* 2 ▸  Bootstrap                                                 */
+/* -------------------------------------------------------------- */
+(async () => {
+  /* MongoDB */
+  await connectDB();
+  console.log('✅  MongoDB connected');
+
+  /* Express */
+  const app = express();
+  app.use(express.json({ limit: '10mb' }));
+
+  // Driver bot updates
+  app.post('/telegram/webhook',
+    express.json({ limit: '10mb' }),
+    telegramRouter
+  );
+
+  // Rider bot updates
+  app.post('/telegram/rider-webhook',
+    express.json({ limit: '10mb' }),
+    async (req, res) => {
+      try {
+        await RiderPort.processUpdate(req.body);
+        res.sendStatus(200);
+      } catch (err) {
+        console.error('rider‑webhook failed:', err);
+        res.sendStatus(500);
+      }
+    }
+  );
+
+  // Admin helper – push dashboard link when driver approved
+  app.post('/admin/notify-approval', async (req, res) => {
+    try {
+      const { driverId } = req.body;
+      if (!driverId) return res.status(400).json({ error: 'driverId is required' });
+
+      const d = await Driver.findById(driverId);
+      if (!d) return res.status(404).json({ error: 'Driver not found' });
+
+      d.status = 'approved';
+      await d.save();
+      await sendApprovalLink(d);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('notify‑approval failed:', err);
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  /* HTTP + Socket.io */
+  const http = createServer(app);
+  const io   = new IO(http, { cors: { origin: PUBLIC_SOCKET_ORIGIN } });
+
+  io.on('connection', socket => {
+    console.log('⚡ Socket connected:', socket.id);
+    socket.on('disconnect', () => console.log('⚡ Socket disconnected:', socket.id));
+  });
+
+  // ✅ THIS LINE ENSURES YOUR APP BINDS TO A PORT
+  http.listen(Number(PORT), () =>
+    console.log(`> backend running on http://localhost:${PORT}`)
+  );
+
+  /* -------------------------------------------------------------- */
+  /* 3 ▸ Telegram webhook registration                             */
+  /* -------------------------------------------------------------- */
+
+  if (NODE_ENV === 'production') {
+    try {
+      console.log('→ setting production webhooks…');
+      await bot.setWebHook(TELEGRAM_WEBHOOK_URL!);
+      await RiderPort.setWebHook(RIDER_WEBHOOK_URL!);
+      console.log('✅ production webhooks set');
+    } catch (err) {
+      console.error('❌ setWebhook (prod) failed:', err);
+    }
+  }
+
+  if (NODE_ENV !== 'production') {
+    const tunnel = await openTunnel();
+    if (tunnel) {
+      const driverUrl = `${tunnel.url}/telegram/webhook`;
+      const riderUrl  = `${tunnel.url}/telegram/rider-webhook`;
+      try {
+        await bot.setWebHook(driverUrl);
+        await RiderPort.setWebHook(riderUrl);
+        console.log('→ setWebhook (dev):', { driverUrl, riderUrl });
+      } catch (err) {
+        console.error('❌ setWebhook (dev) failed:', err);
+      }
+
+      const cleanup = async () => {
+        console.log('\n↩  Closing localtunnel…');
+        try { await tunnel.close(); } catch {}
+        process.exit(0);
+      };
+      process.once('SIGINT', cleanup);
+      process.once('SIGTERM', cleanup);
+    } else {
+      console.warn('‼️  Could not establish localtunnel – webhooks won’t auto-register.');
+    }
+  }
+})();
